@@ -7,7 +7,7 @@
  *
  * App → editor: open {plan, changed?} (a 판, or the plan being made while the chat changes it),
  *   seek {at}, get_plan {request}, measure_export {request} (how long this browser takes to export).
- * Editor → app: ready, opened {request?}, plan {request, plan}, time {at}, error {message}.
+ * Editor → app: ready, opened {request?}, edited {edited} (the teacher changed it here), plan {request, plan}, time {at}, error {message}.
  */
 import { EditorCore } from "@/core";
 import { processMediaAssets } from "@/media/processing";
@@ -49,8 +49,10 @@ const ALLOWED = [
 /** In the TA's frame: its welcome and news cards stay away. */
 export const inQuestiFrame = () => typeof window !== "undefined" && window.parent !== window;
 let running: (() => void) | null = null;
-/** Our marks: a 판's changed stretch, in the TA's own purple. */
-const CHANGED_COLOR = "#4b4fe0";
+/** 바뀐 곳: the plain yellow highlighter of every TA viewer (its --color-change-mark), shown as long as the 판 is. */
+const CHANGED_COLOR = "#e8ff00";
+/** While a plan is laid out its own changes are not the teacher's edits. */
+let laying = false;
 
 const seconds = (time: number) => mediaTimeToSeconds({ time: time as MediaTime });
 const ticks = (value: number) => mediaTimeFromSeconds({ seconds: Math.max(0, value) });
@@ -85,6 +87,15 @@ async function assetFor(url: string, name: string, ref: Record<string, string>):
 
 /** A plan as this editor's timeline: its pieces one after another on the main track, then the logo and captions over them. */
 async function layOut(plan: Plan, changed: Changed | null | undefined) {
+	laying = true;
+	try {
+		await layOutNow(plan, changed);
+	} finally {
+		laying = false;
+	}
+}
+
+async function layOutNow(plan: Plan, changed: Changed | null | undefined) {
 	const editor = EditorCore.getInstance();
 	const scene = editor.scenes.getActiveScene();
 	const all = [...scene.tracks.overlay, scene.tracks.main, ...scene.tracks.audio].flatMap((track) => track.elements.map((element) => ({ trackId: track.id, elementId: element.id })));
@@ -235,7 +246,9 @@ export function startQuestiBridge({ setTheme }: { setTheme?: (theme: string) => 
 		if (data.type === "open" && data.plan) run(async () => {
 			given = { ...given, ...(data.files ?? {}) };
 			await layOut(data.plan!, data.changed);
+			edited = false;
 			tell({ type: "opened", request: data.request });
+			tell({ type: "edited", edited: false });
 		});
 		// The TA's light or dark look.
 		if (data.type === "theme" && (data.theme === "dark" || data.theme === "light")) setTheme?.(data.theme);
@@ -248,6 +261,13 @@ export function startQuestiBridge({ setTheme }: { setTheme?: (theme: string) => 
 		});
 	};
 	window.addEventListener("message", onMessage);
+	// The teacher changed the timeline here (cut, moved, typed): the TA offers [수정 완료]·[되돌리기].
+	let edited = false;
+	const stopWatching = EditorCore.getInstance().timeline.subscribe(() => {
+		if (laying || edited) return;
+		edited = true;
+		tell({ type: "edited", edited: true });
+	});
 	// Where it plays, for "여기서 잘라 줘" (a few times a second at most, when it moves).
 	let last = -1;
 	const timer = window.setInterval(() => {
@@ -259,6 +279,7 @@ export function startQuestiBridge({ setTheme }: { setTheme?: (theme: string) => 
 	running = () => {
 		window.removeEventListener("message", onMessage);
 		window.clearInterval(timer);
+		stopWatching();
 		running = null;
 	};
 	return running;
