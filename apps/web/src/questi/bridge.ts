@@ -24,10 +24,15 @@ type Plan = {
 	title?: string;
 	sources: Source[];
 	logo?: { url: string; ref: Record<string, string>; position?: string; size?: number; opacity?: number } | null;
-	captions?: { text: string; start: number; end: number }[];
+	captions?: { text: string; start: number; end: number; position?: string }[];
+	/** 쇼츠 다시 짜기 (edit_video layout): scenes on the piece's own clock, each the region the TA's agent chose to keep. */
+	layout?: { template?: "focus" | "split"; scenes?: { start: number; region: Region; second?: Region | null }[] } | null;
 	/** 쇼츠·릴스 and other shapes (edit_video frame): the picture cut to it around `focus`, or fitted whole over a blurred copy. */
 	frame?: { shape?: string; fit?: "crop" | "fit"; focus?: number } | null;
 };
+type Region = { x: number; y: number; w: number; h: number };
+/** The layout the TA's engine makes (videoEdits.ts layoutPlan): 1080×1920, a title band, the middle band. */
+const LAYOUT = { width: 1080, height: 1920, top: 300, middle: 1180 } as const;
 /** The shapes edit_video makes (videoEdits.ts SHAPES). */
 const SHAPES: Record<string, [number, number]> = { "9:16": [1080, 1920], "1:1": [1080, 1080], "4:5": [1080, 1350], "16:9": [1920, 1080] };
 type Changed = { at: number; until: number | null; label: string | null };
@@ -109,11 +114,36 @@ async function layOutNow(plan: Plan, changed: Changed | null | undefined) {
 
 	// The canvas is what the TA's engine makes: the shape asked for, else the first video's own size.
 	const first = plan.sources[0] ? await assetFor(plan.sources[0].url, plan.sources[0].name ?? "영상.mp4", plan.sources[0].ref) : null;
-	const shape = plan.frame?.shape ? SHAPES[plan.frame.shape] : null;
+	const laidOut = plan.layout && plan.sources.length === 1 ? plan.layout : null;
+	const shape = laidOut ? ([LAYOUT.width, LAYOUT.height] as [number, number]) : plan.frame?.shape ? SHAPES[plan.frame.shape] : null;
 	const canvasSize = shape ? { width: shape[0], height: shape[1] } : first?.width && first?.height ? { width: first.width, height: first.height } : { width: 1920, height: 1080 };
 
 	let at = 0;
-	for (const source of plan.sources) {
+	if (laidOut && first) {
+		const source = plan.sources[0];
+		const length = first.duration ?? 0;
+		const from = Math.min(source.start ?? 0, length);
+		const to = Math.min(source.end ?? length, length);
+		const scenes = (laidOut.scenes?.length ? laidOut.scenes : [{ start: from, region: { x: 0, y: 0, w: 1, h: 1 } }]).slice().sort((a, b) => a.start - b.start);
+		scenes.forEach((scene, index) => {
+			const start = Math.max(from, index === 0 ? from : scene.start);
+			const end = Math.min(to, index + 1 < scenes.length ? scenes[index + 1].start : to);
+			if (end - start <= 0.05) return;
+			const boxes: [Region, number, number][] =
+				laidOut.template === "split"
+					? [[scene.region, LAYOUT.height / 2, LAYOUT.height / 4], [scene.second ?? { x: 0, y: 0, w: 1, h: 1 }, LAYOUT.height / 2, (LAYOUT.height * 3) / 4]]
+					: [[scene.region, LAYOUT.middle, LAYOUT.top + LAYOUT.middle / 2]];
+			for (const [region, boxHeight, centerY] of boxes) {
+				const element = buildElementFromMedia({ mediaId: first.id, mediaType: first.type, name: first.name, duration: ticks(end - start), startTime: ticks(at) });
+				editor.timeline.insertElement({
+					element: { ...element, trimStart: ticks(start), trimEnd: ticks(length - end), params: { ...element.params, ...regionPlace(first, region, boxHeight, centerY) }, masks: [regionMask(region, index)] } as typeof element,
+					placement: { mode: "auto", trackType: "video" },
+				});
+			}
+			at += end - start;
+		});
+	}
+	for (const source of laidOut ? [] : plan.sources) {
 		const asset = await assetFor(source.url, source.name ?? "영상.mp4", source.ref);
 		const length = asset.duration ?? 0;
 		const start = Math.min(source.start ?? 0, length);
@@ -131,7 +161,7 @@ async function layOutNow(plan: Plan, changed: Changed | null | undefined) {
 	}
 	for (const caption of plan.captions ?? []) {
 		const text = buildTextElement({ raw: { ...DEFAULTS.text.element, name: caption.text.slice(0, 20), duration: ticks(caption.end - caption.start) }, startTime: ticks(caption.start) });
-		editor.timeline.insertElement({ element: { ...text, params: { ...text.params, ...captionLook(canvasSize), content: caption.text } }, placement: { mode: "auto", trackType: "text" } });
+		editor.timeline.insertElement({ element: { ...text, params: { ...text.params, ...captionLook(canvasSize, caption.position ?? (laidOut ? 0.74 : "bottom")), content: caption.text } }, placement: { mode: "auto", trackType: "text" } });
 	}
 	// Set last: the first clip put in sets the canvas to its own size (insert-element.ts).
 	await editor.project.updateSettings({
@@ -164,10 +194,35 @@ function logoPlace(logo: NonNullable<Plan["logo"]>, asset: MediaAsset, canvas: {
 }
 
 /**
+ * A region of the picture filling its box on the 1080×1920 canvas, as the engine lays it out:
+ * scaled to fit the box whole, its middle at the box's middle (the rest masked off, regionMask).
+ */
+function regionPlace(asset: MediaAsset, region: Region, boxHeight: number, centerY: number) {
+	const width = asset.width ?? 1920;
+	const height = asset.height ?? 1080;
+	const fit = Math.min(LAYOUT.width / width, LAYOUT.height / height);
+	const drawnWidth = width * fit;
+	const drawnHeight = height * fit;
+	const scale = Math.min(LAYOUT.width / (region.w * drawnWidth), boxHeight / (region.h * drawnHeight));
+	const offsetX = (region.x + region.w / 2 - 0.5) * drawnWidth * scale;
+	const offsetY = (region.y + region.h / 2 - 0.5) * drawnHeight * scale;
+	return { "transform.scaleX": scale, "transform.scaleY": scale, "transform.positionX": Math.round(-offsetX), "transform.positionY": Math.round(centerY - LAYOUT.height / 2 - offsetY) };
+}
+
+/** Only the region shows (a rectangle mask, in fractions of the clip's own size). */
+function regionMask(region: Region, index: number) {
+	return {
+		id: `questi-region-${index}-${Math.round(region.x * 1000)}-${Math.round(region.y * 1000)}`,
+		type: "rectangle" as const,
+		params: { feather: 0, inverted: false, strokeColor: "#ffffff", strokeWidth: 0, strokeAlign: "center" as const, centerX: region.x + region.w / 2 - 0.5, centerY: region.y + region.h / 2 - 0.5, width: region.w, height: region.h, rotation: 0, scale: 1 },
+	};
+}
+
+/**
  * A caption as the TA's engine draws it (videoEdits.ts drawCaption): white bold words on a dark
  * rounded box near the bottom — so the editor shows what the MP4 will be.
  */
-function captionLook(canvas: { width: number; height: number }) {
+function captionLook(canvas: { width: number; height: number }, place: string | number) {
 	// The engine's size: min(96, max(20, 5.5% of the shorter side)) px; here a size is px × 90 / the canvas height.
 	const px = Math.min(96, Math.max(20, Math.min(canvas.width, canvas.height) * 0.055));
 	const fontSize = Math.round(((px * 90) / canvas.height) * 10) / 10;
@@ -181,7 +236,14 @@ function captionLook(canvas: { width: number; height: number }) {
 		"background.cornerRadius": 18,
 		"background.paddingX": 24,
 		"background.paddingY": 14,
-		"transform.positionY": Math.round(canvas.height / 2 - canvas.height * 0.06 - boxHeight / 2),
+		"transform.positionY":
+			place === "top"
+				? Math.round((canvas.height === LAYOUT.height ? LAYOUT.top / 2 : canvas.height * 0.06 + boxHeight / 2) - canvas.height / 2)
+				: place === "center"
+					? 0
+					: typeof place === "number"
+						? Math.round(place * canvas.height - canvas.height / 2)
+						: Math.round(canvas.height / 2 - canvas.height * 0.06 - boxHeight / 2),
 	};
 }
 
@@ -215,17 +277,36 @@ function planNow(): Plan {
 	const editor = EditorCore.getInstance();
 	const scene = editor.scenes.getActiveScene();
 	const media = new Map(editor.media.getAssets().map((asset) => [asset.id, asset]));
-	const pieces = [...scene.tracks.main.elements].sort((a, b) => a.startTime - b.startTime);
-	const sources = pieces
-		.filter((element) => element.type === "video" && refs.has(element.mediaId))
-		.map((element) => ({ url: media.get((element as { mediaId: string }).mediaId)?.url ?? "", ref: refs.get((element as { mediaId: string }).mediaId)!, start: seconds(element.trimStart), end: seconds(element.trimStart + element.duration) }));
+	const canvas = editor.project.getActive()?.settings.canvasSize ?? { width: 1920, height: 1080 };
+	const pieces = [...scene.tracks.main.elements].filter((element) => element.type === "video" && refs.has((element as { mediaId: string }).mediaId)).sort((a, b) => a.startTime - b.startTime) as (TimelineElement & { mediaId: string; masks?: { id: string; params: Record<string, number> }[] })[];
+	const regionOf = (element: (typeof pieces)[number]) => {
+		const mask = element.masks?.find((one) => one.id.startsWith("questi-region-"));
+		if (!mask) return null;
+		const { centerX, centerY, width, height } = mask.params;
+		return { x: centerX + 0.5 - width / 2, y: centerY + 0.5 - height / 2, w: width, h: height };
+	};
+	// A laid-out short (each scene its region) stays one: its pieces follow on in the same video.
+	const following = pieces.every((element, index) => index === 0 || (element.mediaId === pieces[0].mediaId && Math.abs(element.trimStart - (pieces[index - 1].trimStart + pieces[index - 1].duration)) < ticks(0.05)));
+	const laidOut = pieces.length > 0 && pieces.every((element) => regionOf(element)) && following;
+	const sources = laidOut
+		? [{ url: media.get(pieces[0].mediaId)?.url ?? "", ref: refs.get(pieces[0].mediaId)!, start: seconds(pieces[0].trimStart), end: seconds(pieces.at(-1)!.trimStart + pieces.at(-1)!.duration) }]
+		: pieces.map((element) => ({ url: media.get(element.mediaId)?.url ?? "", ref: refs.get(element.mediaId)!, start: seconds(element.trimStart), end: seconds(element.trimStart + element.duration) }));
 	const overlay: TimelineElement[] = scene.tracks.overlay.flatMap((track) => [...track.elements] as TimelineElement[]);
 	const image = overlay.find((element) => element.type === "image" && refs.has((element as { mediaId: string }).mediaId)) as { mediaId: string } | undefined;
 	const captions = overlay
 		.filter((element) => element.type === "text")
-		.map((element) => ({ text: String((element.params as Record<string, unknown>).content ?? ""), start: seconds(element.startTime), end: seconds(element.startTime + element.duration) }))
+		.map((element) => {
+			const params = element.params as Record<string, unknown>;
+			const y = Number(params["transform.positionY"] ?? 0);
+			return { text: String(params.content ?? ""), start: seconds(element.startTime), end: seconds(element.startTime + element.duration), ...(y < -canvas.height / 2 + LAYOUT.top ? { position: "top" } : {}) };
+		})
 		.filter((caption) => caption.text.trim());
-	return { sources, ...(image ? { logo: { url: "", ref: refs.get(image.mediaId)! } } : {}), ...(captions.length ? { captions } : {}) };
+	return {
+		sources,
+		...(laidOut ? { layout: { template: "focus" as const, scenes: pieces.map((element) => ({ start: seconds(element.trimStart), region: regionOf(element)! })) } } : {}),
+		...(image ? { logo: { url: "", ref: refs.get(image.mediaId)! } } : {}),
+		...(captions.length ? { captions } : {}),
+	};
 }
 
 export function startQuestiBridge({ setTheme }: { setTheme?: (theme: string) => void } = {}) {
