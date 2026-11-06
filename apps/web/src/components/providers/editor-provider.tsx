@@ -63,7 +63,13 @@ export function EditorProvider({ projectId, children }: EditorProviderProps) {
 							name: "Untitled Project",
 							...(inQuestiFrame() ? { id: projectId } : {}),
 						});
-						router.replace(`/editor/${newProjectId}`);
+						if (newProjectId === projectId) {
+							// The same address: nothing to move to, so it is opened here.
+							await editor.project.loadProject({ id: projectId });
+							if (cancelled) return;
+							setIsLoading(false);
+							loadFontAtlas();
+						} else router.replace(`/editor/${newProjectId}`);
 					} catch (_createErr) {
 						setError("Failed to create project");
 						setIsLoading(false);

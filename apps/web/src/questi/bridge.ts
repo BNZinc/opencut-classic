@@ -105,13 +105,35 @@ async function layOut(plan: Plan, changed: Changed | null | undefined) {
 	}
 	if (plan.logo?.url) {
 		const logo = await assetFor(plan.logo.url, "logo.png", plan.logo.ref);
-		editor.timeline.insertElement({ element: buildElementFromMedia({ mediaId: logo.id, mediaType: "image", name: logo.name, duration: ticks(at), startTime: ticks(0) }), placement: { mode: "auto" } });
+		const image = buildElementFromMedia({ mediaId: logo.id, mediaType: "image", name: logo.name, duration: ticks(at), startTime: ticks(0) });
+		editor.timeline.insertElement({ element: { ...image, params: { ...image.params, ...logoPlace(plan.logo, logo) } }, placement: { mode: "auto" } });
 	}
 	for (const caption of plan.captions ?? []) {
 		const text = buildTextElement({ raw: { ...DEFAULTS.text.element, name: caption.text.slice(0, 20), duration: ticks(caption.end - caption.start) }, startTime: ticks(caption.start) });
 		editor.timeline.insertElement({ element: { ...text, params: { ...text.params, content: caption.text } }, placement: { mode: "auto", trackType: "text" } });
 	}
 	if (changed) markChanged(changed);
+}
+
+/**
+ * The logo where the TA's engine puts it (videoEdits.ts): its longer side `size` of the picture's
+ * shorter side (0.14 unless given), 3% of it from the corner — so the editor shows what the MP4 will be.
+ * (This editor's place is pixels from the middle of the canvas; scale 1 is the picture fitted whole.)
+ */
+function logoPlace(logo: NonNullable<Plan["logo"]>, asset: MediaAsset) {
+	const canvas = EditorCore.getInstance().project.getActive()?.settings.canvasSize ?? { width: 1920, height: 1080 };
+	const width = asset.width ?? canvas.width;
+	const height = asset.height ?? canvas.height;
+	const short = Math.min(canvas.width, canvas.height);
+	const fit = Math.min(canvas.width / width, canvas.height / height);
+	const scale = (short * (logo.size ?? 0.14)) / (Math.max(width, height) * fit);
+	const drawnWidth = width * fit * scale;
+	const drawnHeight = height * fit * scale;
+	const margin = short * 0.03;
+	const corner = logo.position ?? "top-right";
+	const x = corner === "center" ? 0 : corner.endsWith("left") ? margin + drawnWidth / 2 - canvas.width / 2 : canvas.width / 2 - margin - drawnWidth / 2;
+	const y = corner === "center" ? 0 : corner.startsWith("top") ? margin + drawnHeight / 2 - canvas.height / 2 : canvas.height / 2 - margin - drawnHeight / 2;
+	return { "transform.positionX": Math.round(x), "transform.positionY": Math.round(y), "transform.scaleX": scale, "transform.scaleY": scale, ...(logo.opacity !== undefined ? { opacity: logo.opacity } : {}) };
 }
 
 /** 바뀐 곳: a bookmark over the changed stretch (its words as the note), the playhead at its start. */
