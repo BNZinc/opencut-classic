@@ -26,7 +26,7 @@ type Plan = {
 	logo?: { url: string; ref: Record<string, string>; position?: string; size?: number; opacity?: number } | null;
 	captions?: { text: string; start: number; end: number; position?: string }[];
 	/** 쇼츠 다시 짜기 (edit_video layout): scenes on the piece's own clock, each the region the TA's agent chose to keep. */
-	layout?: { template?: "focus" | "split"; scenes?: { start: number; region: Region; second?: Region | null }[] } | null;
+	layout?: { template?: "focus" | "split"; scenes?: { start: number; region?: Region; regions?: Region[]; second?: Region | null }[] } | null;
 	/** 쇼츠·릴스 and other shapes (edit_video frame): the picture cut to it around `focus`, or fitted whole over a blurred copy. */
 	frame?: { shape?: string; fit?: "crop" | "fit"; focus?: number } | null;
 };
@@ -124,22 +124,23 @@ async function layOutNow(plan: Plan, changed: Changed | null | undefined) {
 		const length = first.duration ?? 0;
 		const from = Math.min(source.start ?? 0, length);
 		const to = Math.min(source.end ?? length, length);
-		const scenes = (laidOut.scenes?.length ? laidOut.scenes : [{ start: from, region: { x: 0, y: 0, w: 1, h: 1 } }]).slice().sort((a, b) => a.start - b.start);
+		const scenes = (laidOut.scenes?.length ? laidOut.scenes : [{ start: from, regions: [{ x: 0, y: 0, w: 1, h: 1 }] }]).slice().sort((a, b) => a.start - b.start);
 		scenes.forEach((scene, index) => {
 			const start = Math.max(from, index === 0 ? from : scene.start);
 			const end = Math.min(to, index + 1 < scenes.length ? scenes[index + 1].start : to);
 			if (end - start <= 0.05) return;
-			const boxes: [Region, number, number][] =
+			const parts = scene.regions?.length ? scene.regions : [scene.region ?? { x: 0, y: 0, w: 1, h: 1 }];
+			const placed =
 				laidOut.template === "split"
-					? [[scene.region, LAYOUT.height / 2, LAYOUT.height / 4], [scene.second ?? { x: 0, y: 0, w: 1, h: 1 }, LAYOUT.height / 2, (LAYOUT.height * 3) / 4]]
-					: [[scene.region, LAYOUT.middle, LAYOUT.top + LAYOUT.middle / 2]];
-			for (const [region, boxHeight, centerY] of boxes) {
+					? [...stacked(first, parts, LAYOUT.height / 2, 0), ...stacked(first, [scene.second ?? { x: 0, y: 0, w: 1, h: 1 }], LAYOUT.height / 2, LAYOUT.height / 2)]
+					: stacked(first, parts, LAYOUT.middle, LAYOUT.top);
+			placed.forEach(({ region, params }, part) => {
 				const element = buildElementFromMedia({ mediaId: first.id, mediaType: first.type, name: first.name, duration: ticks(end - start), startTime: ticks(at) });
 				editor.timeline.insertElement({
-					element: { ...element, trimStart: ticks(start), trimEnd: ticks(length - end), params: { ...element.params, ...regionPlace(first, region, boxHeight, centerY) }, masks: [regionMask(region, index)] } as typeof element,
+					element: { ...element, trimStart: ticks(start), trimEnd: ticks(length - end), params: { ...element.params, ...params }, masks: [regionMask(region, index * 10 + part)] } as typeof element,
 					placement: { mode: "auto", trackType: "video" },
 				});
-			}
+			});
 			at += end - start;
 		});
 	}
@@ -194,19 +195,29 @@ function logoPlace(logo: NonNullable<Plan["logo"]>, asset: MediaAsset, canvas: {
 }
 
 /**
- * A region of the picture filling its box on the 1080×1920 canvas, as the engine lays it out:
- * scaled to fit the box whole, its middle at the box's middle (the rest masked off, regionMask).
+ * Parts of the picture stacked top to bottom in a band of the 1080×1920 canvas, as the engine lays
+ * them out (videoEdits.ts regionsInBox): each as wide as the canvas allows, all smaller together when
+ * they would not fit the band, 24px apart, the stack in the middle of the band. Each part is the
+ * whole clip scaled and moved so that part lands in its place (the rest masked off, regionMask).
  */
-function regionPlace(asset: MediaAsset, region: Region, boxHeight: number, centerY: number) {
+function stacked(asset: MediaAsset, regions: Region[], bandHeight: number, bandTop: number) {
 	const width = asset.width ?? 1920;
 	const height = asset.height ?? 1080;
+	const gap = regions.length > 1 ? 24 : 0;
+	const natural = regions.map((region) => (LAYOUT.width * region.h * height) / (region.w * width));
+	const total = natural.reduce((sum, value) => sum + value, 0) + gap * (regions.length - 1);
+	const k = Math.min(1, bandHeight / total);
 	const fit = Math.min(LAYOUT.width / width, LAYOUT.height / height);
-	const drawnWidth = width * fit;
-	const drawnHeight = height * fit;
-	const scale = Math.min(LAYOUT.width / (region.w * drawnWidth), boxHeight / (region.h * drawnHeight));
-	const offsetX = (region.x + region.w / 2 - 0.5) * drawnWidth * scale;
-	const offsetY = (region.y + region.h / 2 - 0.5) * drawnHeight * scale;
-	return { "transform.scaleX": scale, "transform.scaleY": scale, "transform.positionX": Math.round(-offsetX), "transform.positionY": Math.round(centerY - LAYOUT.height / 2 - offsetY) };
+	let y = bandTop + (bandHeight - total * k) / 2;
+	return regions.map((region, index) => {
+		const partHeight = natural[index] * k;
+		const scale = (LAYOUT.width * k) / (region.w * width * fit);
+		const centerY = y + partHeight / 2;
+		y += partHeight + gap * k;
+		const offsetX = (region.x + region.w / 2 - 0.5) * width * fit * scale;
+		const offsetY = (region.y + region.h / 2 - 0.5) * height * fit * scale;
+		return { region, params: { "transform.scaleX": scale, "transform.scaleY": scale, "transform.positionX": Math.round(-offsetX), "transform.positionY": Math.round(centerY - LAYOUT.height / 2 - offsetY) } };
+	});
 }
 
 /** Only the region shows (a rectangle mask, in fractions of the clip's own size). */
@@ -273,23 +284,45 @@ function markChanged(changed: Changed) {
 }
 
 /** The timeline as a plan: the main track's pieces in order, an image as the logo, text as captions. */
+/** The scenes of a laid-out short: the parts starting together, top to bottom as they stand. */
+function scenesOf<T extends TimelineElement>(pieces: T[], regionOf: (element: T) => Region | null) {
+	const byStart = new Map<number, T[]>();
+	for (const element of pieces) byStart.set(element.startTime, [...(byStart.get(element.startTime) ?? []), element]);
+	return [...byStart.values()]
+		.sort((a, b) => a[0].startTime - b[0].startTime)
+		.map((parts) => {
+			// Top to bottom as laid out: the part number is in its mask's id (questi-region-<scene×10+part>-…).
+			const order = (element: T) => Number(/questi-region-(\d+)/.exec(((element as { masks?: { id: string }[] }).masks ?? []).map((mask) => mask.id).join(" "))?.[1] ?? 0) % 10;
+			const ordered = parts.slice().sort((a, b) => order(a) - order(b));
+			return { start: seconds(ordered[0].trimStart), regions: ordered.map((element) => regionOf(element)!) };
+		});
+}
+
 function planNow(): Plan {
 	const editor = EditorCore.getInstance();
 	const scene = editor.scenes.getActiveScene();
 	const media = new Map(editor.media.getAssets().map((asset) => [asset.id, asset]));
 	const canvas = editor.project.getActive()?.settings.canvasSize ?? { width: 1920, height: 1080 };
-	const pieces = [...scene.tracks.main.elements].filter((element) => element.type === "video" && refs.has((element as { mediaId: string }).mediaId)).sort((a, b) => a.startTime - b.startTime) as (TimelineElement & { mediaId: string; masks?: { id: string; params: Record<string, number> }[] })[];
+	type Piece = TimelineElement & { mediaId: string; masks?: { id: string; params: Record<string, number> }[] };
+	const isPiece = (element: TimelineElement) => element.type === "video" && refs.has((element as { mediaId: string }).mediaId);
+	const main = [...scene.tracks.main.elements].filter(isPiece).sort((a, b) => a.startTime - b.startTime) as Piece[];
+	// A laid-out short's stacked parts sit on the tracks above the main one (one clip a track at a time).
+	const parts = scene.tracks.overlay.flatMap((track) => [...track.elements] as TimelineElement[]).filter(isPiece) as Piece[];
+	const laidParts = [...main, ...parts].filter((element) => element.masks?.some((mask) => mask.id.startsWith("questi-region-")));
+	const pieces: Piece[] = laidParts.length === main.length + parts.length && laidParts.length ? laidParts.sort((a, b) => a.startTime - b.startTime) : main;
 	const regionOf = (element: (typeof pieces)[number]) => {
 		const mask = element.masks?.find((one) => one.id.startsWith("questi-region-"));
 		if (!mask) return null;
 		const { centerX, centerY, width, height } = mask.params;
 		return { x: centerX + 0.5 - width / 2, y: centerY + 0.5 - height / 2, w: width, h: height };
 	};
-	// A laid-out short (each scene its region) stays one: its pieces follow on in the same video.
-	const following = pieces.every((element, index) => index === 0 || (element.mediaId === pieces[0].mediaId && Math.abs(element.trimStart - (pieces[index - 1].trimStart + pieces[index - 1].duration)) < ticks(0.05)));
+	// A laid-out short (each scene its stacked parts) stays one: its scenes follow on in the same video.
+	const starts = [...new Set(pieces.map((element) => element.startTime))].sort((a, b) => a - b);
+	const firsts = starts.map((time) => pieces.find((element) => element.startTime === time)!);
+	const following = firsts.every((element, index) => index === 0 || (element.mediaId === firsts[0].mediaId && Math.abs(element.trimStart - (firsts[index - 1].trimStart + firsts[index - 1].duration)) < ticks(0.05)));
 	const laidOut = pieces.length > 0 && pieces.every((element) => regionOf(element)) && following;
 	const sources = laidOut
-		? [{ url: media.get(pieces[0].mediaId)?.url ?? "", ref: refs.get(pieces[0].mediaId)!, start: seconds(pieces[0].trimStart), end: seconds(pieces.at(-1)!.trimStart + pieces.at(-1)!.duration) }]
+		? [{ url: media.get(firsts[0].mediaId)?.url ?? "", ref: refs.get(firsts[0].mediaId)!, start: seconds(firsts[0].trimStart), end: seconds(firsts.at(-1)!.trimStart + firsts.at(-1)!.duration) }]
 		: pieces.map((element) => ({ url: media.get(element.mediaId)?.url ?? "", ref: refs.get(element.mediaId)!, start: seconds(element.trimStart), end: seconds(element.trimStart + element.duration) }));
 	const overlay: TimelineElement[] = scene.tracks.overlay.flatMap((track) => [...track.elements] as TimelineElement[]);
 	const image = overlay.find((element) => element.type === "image" && refs.has((element as { mediaId: string }).mediaId)) as { mediaId: string } | undefined;
@@ -303,7 +336,7 @@ function planNow(): Plan {
 		.filter((caption) => caption.text.trim());
 	return {
 		sources,
-		...(laidOut ? { layout: { template: "focus" as const, scenes: pieces.map((element) => ({ start: seconds(element.trimStart), region: regionOf(element)! })) } } : {}),
+		...(laidOut ? { layout: { template: "focus" as const, scenes: scenesOf(pieces, regionOf) } } : {}),
 		...(image ? { logo: { url: "", ref: refs.get(image.mediaId)! } } : {}),
 		...(captions.length ? { captions } : {}),
 	};
