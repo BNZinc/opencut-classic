@@ -17,7 +17,8 @@ import { MigrationDialog } from "@/project/components/migration-dialog";
 import { usePanelStore } from "@/editor/panel-store";
 import { usePasteMedia } from "@/media/use-paste-media";
 import { MobileGate } from "@/components/editor/mobile-gate";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { inQuestiFrame, startQuestiBridge } from "@/questi/bridge";
 import { useEditor } from "@/editor/use-editor";
 import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -38,6 +39,9 @@ import {
 export default function Editor() {
 	const params = useParams();
 	const projectId = params.project_id as string;
+	// In the TA's frame (after the first paint, so the server's page and the browser's agree).
+	const [framed, setFramed] = useState(false);
+	useEffect(() => setFramed(inQuestiFrame()), []);
 
 	return (
 		<MobileGate>
@@ -48,9 +52,10 @@ export default function Editor() {
 					<div className="min-h-0 min-w-0 flex-1">
 						<EditorLayout />
 					</div>
-					<Onboarding />
+					<QuestiBridge />
+					{!framed && <Onboarding />}
 					<MigrationDialog />
-					<ChangelogNotification />
+					{!framed && <ChangelogNotification />}
 				</div>
 			</EditorProvider>
 		</MobileGate>
@@ -206,4 +211,10 @@ function EditorLayout() {
 			</ResizablePanel>
 		</ResizablePanelGroup>
 	);
+}
+
+/** 퀘스티 TA 다리: talks with the TA app when this editor is in its frame (src/questi/bridge.ts). */
+function QuestiBridge() {
+	useEffect(() => startQuestiBridge(), []);
+	return null;
 }
