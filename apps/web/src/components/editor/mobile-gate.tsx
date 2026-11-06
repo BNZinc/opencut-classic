@@ -6,6 +6,7 @@ import { Button } from "../ui/button";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { ArrowLeft01Icon, ArrowRight01Icon } from "@hugeicons/core-free-icons";
 import { useRouter } from "next/navigation";
+import { inQuestiFrame } from "@/questi/bridge";
 
 const STORAGE_KEY = "mobile-acknowledged";
 
@@ -18,7 +19,8 @@ export function MobileGate({ children }: MobileGateProps) {
 	const [show, setShow] = useState<boolean | null>(null);
 
 	useEffect(() => {
-		const isMobile = window.innerWidth < 1024;
+		// In the TA's frame the editor is the narrow pane beside its chat, laid out for it (page.tsx): never gated.
+		const isMobile = window.innerWidth < 1024 && !inQuestiFrame();
 		const acknowledged = localStorage.getItem(STORAGE_KEY) === "true";
 		setShow(isMobile && !acknowledged);
 	}, []);

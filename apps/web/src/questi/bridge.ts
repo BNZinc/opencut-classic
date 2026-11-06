@@ -25,9 +25,13 @@ type Plan = {
 	sources: Source[];
 	logo?: { url: string; ref: Record<string, string>; position?: string; size?: number; opacity?: number } | null;
 	captions?: { text: string; start: number; end: number }[];
+	/** 쇼츠·릴스 and other shapes (edit_video frame): the picture cut to it around `focus`, or fitted whole over a blurred copy. */
+	frame?: { shape?: string; fit?: "crop" | "fit"; focus?: number } | null;
 };
+/** The shapes edit_video makes (videoEdits.ts SHAPES). */
+const SHAPES: Record<string, [number, number]> = { "9:16": [1080, 1920], "1:1": [1080, 1080], "4:5": [1080, 1350], "16:9": [1920, 1080] };
 type Changed = { at: number; until: number | null; label: string | null };
-type Message = { questiVideo: 1; type: string; request?: string; plan?: Plan; changed?: Changed | null; at?: number; files?: Record<string, Blob> };
+type Message = { questiVideo: 1; type: string; request?: string; plan?: Plan; changed?: Changed | null; at?: number; files?: Record<string, Blob>; theme?: string };
 
 /** The TA app's own pages (its desktop webview, its web), plus NEXT_PUBLIC_QUESTI_ORIGINS (development). */
 const ALLOWED = [
@@ -92,6 +96,11 @@ async function layOut(plan: Plan, changed: Changed | null | undefined) {
 	if (project && stale.length) editor.media.removeMediaAssets({ projectId: project.metadata.id, ids: stale });
 	for (const bookmark of scene.bookmarks) editor.command.execute({ command: new ToggleBookmarkCommand(bookmark.time) });
 
+	// The canvas is what the TA's engine makes: the shape asked for, else the first video's own size.
+	const first = plan.sources[0] ? await assetFor(plan.sources[0].url, plan.sources[0].name ?? "영상.mp4", plan.sources[0].ref) : null;
+	const shape = plan.frame?.shape ? SHAPES[plan.frame.shape] : null;
+	const canvasSize = shape ? { width: shape[0], height: shape[1] } : first?.width && first?.height ? { width: first.width, height: first.height } : { width: 1920, height: 1080 };
+
 	let at = 0;
 	for (const source of plan.sources) {
 		const asset = await assetFor(source.url, source.name ?? "영상.mp4", source.ref);
@@ -100,18 +109,26 @@ async function layOut(plan: Plan, changed: Changed | null | undefined) {
 		const end = Math.min(source.end ?? length, length);
 		if (end <= start) continue;
 		const element = buildElementFromMedia({ mediaId: asset.id, mediaType: asset.type, name: asset.name, duration: ticks(end - start), startTime: ticks(at) });
-		editor.timeline.insertElement({ element: { ...element, trimStart: ticks(start), trimEnd: ticks(length - end) }, placement: { mode: "auto", trackType: "video" } });
+		const cut = shape && plan.frame?.fit !== "fit" && asset.width && asset.height ? cropPlace(asset.width, asset.height, shape[0], shape[1], plan.frame?.focus ?? 0.5) : null;
+		editor.timeline.insertElement({ element: { ...element, trimStart: ticks(start), trimEnd: ticks(length - end), ...(cut ? { params: { ...element.params, ...cut } } : {}) }, placement: { mode: "auto", trackType: "video" } });
 		at += end - start;
 	}
 	if (plan.logo?.url) {
 		const logo = await assetFor(plan.logo.url, "logo.png", plan.logo.ref);
 		const image = buildElementFromMedia({ mediaId: logo.id, mediaType: "image", name: logo.name, duration: ticks(at), startTime: ticks(0) });
-		editor.timeline.insertElement({ element: { ...image, params: { ...image.params, ...logoPlace(plan.logo, logo) } }, placement: { mode: "auto" } });
+		editor.timeline.insertElement({ element: { ...image, params: { ...image.params, ...logoPlace(plan.logo, logo, canvasSize) } }, placement: { mode: "auto" } });
 	}
 	for (const caption of plan.captions ?? []) {
 		const text = buildTextElement({ raw: { ...DEFAULTS.text.element, name: caption.text.slice(0, 20), duration: ticks(caption.end - caption.start) }, startTime: ticks(caption.start) });
-		editor.timeline.insertElement({ element: { ...text, params: { ...text.params, content: caption.text } }, placement: { mode: "auto", trackType: "text" } });
+		editor.timeline.insertElement({ element: { ...text, params: { ...text.params, ...captionLook(canvasSize), content: caption.text } }, placement: { mode: "auto", trackType: "text" } });
 	}
+	// Set last: the first clip put in sets the canvas to its own size (insert-element.ts).
+	await editor.project.updateSettings({
+		settings: { canvasSize, canvasSizeMode: "custom", background: shape && plan.frame?.fit === "fit" ? { type: "blur", blurIntensity: 60 } : { type: "color", color: "#000000" } },
+		pushHistory: false,
+	});
+	// Nothing picked: what was just laid out is the TA's, not the teacher's selection.
+	editor.selection.setSelectedElements({ elements: [] });
 	if (changed) markChanged(changed);
 }
 
@@ -120,8 +137,7 @@ async function layOut(plan: Plan, changed: Changed | null | undefined) {
  * shorter side (0.14 unless given), 3% of it from the corner — so the editor shows what the MP4 will be.
  * (This editor's place is pixels from the middle of the canvas; scale 1 is the picture fitted whole.)
  */
-function logoPlace(logo: NonNullable<Plan["logo"]>, asset: MediaAsset) {
-	const canvas = EditorCore.getInstance().project.getActive()?.settings.canvasSize ?? { width: 1920, height: 1080 };
+function logoPlace(logo: NonNullable<Plan["logo"]>, asset: MediaAsset, canvas: { width: number; height: number }) {
 	const width = asset.width ?? canvas.width;
 	const height = asset.height ?? canvas.height;
 	const short = Math.min(canvas.width, canvas.height);
@@ -136,6 +152,37 @@ function logoPlace(logo: NonNullable<Plan["logo"]>, asset: MediaAsset) {
 	return { "transform.positionX": Math.round(x), "transform.positionY": Math.round(y), "transform.scaleX": scale, "transform.scaleY": scale, ...(logo.opacity !== undefined ? { opacity: logo.opacity } : {}) };
 }
 
+/**
+ * A caption as the TA's engine draws it (videoEdits.ts drawCaption): white bold words on a dark
+ * rounded box near the bottom — so the editor shows what the MP4 will be.
+ */
+function captionLook(canvas: { width: number; height: number }) {
+	// The engine's size: min(96, max(20, 5.5% of the shorter side)) px; here a size is px × 90 / the canvas height.
+	const px = Math.min(96, Math.max(20, Math.min(canvas.width, canvas.height) * 0.055));
+	const fontSize = Math.round(((px * 90) / canvas.height) * 10) / 10;
+	const boxHeight = px * 1.3 + px * 0.6;
+	return {
+		color: "#ffffff",
+		fontWeight: "bold",
+		fontSize,
+		"background.enabled": true,
+		"background.color": "#000000",
+		"background.cornerRadius": 18,
+		"background.paddingX": 24,
+		"background.paddingY": 14,
+		"transform.positionY": Math.round(canvas.height / 2 - canvas.height * 0.06 - boxHeight / 2),
+	};
+}
+
+/** "crop": the picture filling the shape (cut at its sides), its middle at `focus` (0 left … 1 right), as ffmpeg makes it. */
+function cropPlace(width: number, height: number, canvasWidth: number, canvasHeight: number, focus: number) {
+	const fit = Math.min(canvasWidth / width, canvasHeight / height);
+	const cover = Math.max(canvasWidth / width, canvasHeight / height);
+	const scale = cover / fit;
+	const spare = width * cover - canvasWidth;
+	return { "transform.scaleX": scale, "transform.scaleY": scale, "transform.positionX": Math.round(spare * (0.5 - Math.min(1, Math.max(0, focus)))) };
+}
+
 /** 바뀐 곳: a bookmark over the changed stretch (its words as the note), the playhead at its start. */
 function markChanged(changed: Changed) {
 	const editor = EditorCore.getInstance();
@@ -145,6 +192,11 @@ function markChanged(changed: Changed) {
 		command: new UpdateBookmarkCommand({ time, updates: { note: changed.label ?? "바뀐 곳", color: CHANGED_COLOR, ...(changed.until !== null && changed.until > changed.at ? { duration: ticks(changed.until - changed.at) } : {}) } }),
 	});
 	editor.playback.seek({ time });
+	// The picture there drawn now (a seek to where the playhead already is draws nothing).
+	window.setTimeout(() => {
+		editor.playback.seek({ time: ticks(changed.at + 0.01) });
+		editor.playback.seek({ time });
+	}, 300);
 }
 
 /** The timeline as a plan: the main track's pieces in order, an image as the logo, text as captions. */
@@ -165,7 +217,7 @@ function planNow(): Plan {
 	return { sources, ...(image ? { logo: { url: "", ref: refs.get(image.mediaId)! } } : {}), ...(captions.length ? { captions } : {}) };
 }
 
-export function startQuestiBridge() {
+export function startQuestiBridge({ setTheme }: { setTheme?: (theme: string) => void } = {}) {
 	if (!inQuestiFrame() || running) return () => {};
 	let origin: string | null = null;
 	const tell = (body: Record<string, unknown>): void => {
@@ -185,6 +237,8 @@ export function startQuestiBridge() {
 			await layOut(data.plan!, data.changed);
 			tell({ type: "opened", request: data.request });
 		});
+		// The TA's light or dark look.
+		if (data.type === "theme" && (data.theme === "dark" || data.theme === "light")) setTheme?.(data.theme);
 		if (data.type === "seek" && typeof data.at === "number") run(() => EditorCore.getInstance().playback.seek({ time: ticks(data.at!) }));
 		if (data.type === "get_plan") run(() => tell({ type: "plan", request: data.request, plan: planNow() }));
 		if (data.type === "measure_export") run(async () => {

@@ -19,6 +19,7 @@ import { usePasteMedia } from "@/media/use-paste-media";
 import { MobileGate } from "@/components/editor/mobile-gate";
 import { useEffect, useMemo, useState } from "react";
 import { inQuestiFrame, startQuestiBridge } from "@/questi/bridge";
+import { useTheme } from "next-themes";
 import { useEditor } from "@/editor/use-editor";
 import { Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -47,10 +48,10 @@ export default function Editor() {
 		<MobileGate>
 			<EditorProvider projectId={projectId}>
 				<div className="bg-background flex h-screen w-screen flex-col overflow-hidden">
-					<DegradedRendererBanner />
-					<EditorHeader />
+					{!framed && <DegradedRendererBanner />}
+					{!framed && <EditorHeader />}
 					<div className="min-h-0 min-w-0 flex-1">
-						<EditorLayout />
+						<EditorLayout compact={framed} />
 					</div>
 					<QuestiBridge />
 					{!framed && <Onboarding />}
@@ -83,7 +84,11 @@ function DegradedRendererBanner() {
 	);
 }
 
-function EditorLayout() {
+/**
+ * compact: the TA's pane beside its chat (narrow): the picture over the timeline, nothing else —
+ * the TA keeps the files and the 판, and cuts, moves and text are made on the timeline itself.
+ */
+function EditorLayout({ compact = false }: { compact?: boolean }) {
 	usePasteMedia();
 	const { panels, setPanel } = usePanelStore();
 	const activeScene = useEditor((editor) =>
@@ -129,6 +134,19 @@ function EditorLayout() {
 			),
 		[overlaySource.definitions, overlays],
 	);
+
+	if (compact)
+		return (
+			<ResizablePanelGroup direction="vertical" className="size-full gap-[0.18rem] pt-2">
+				<ResizablePanel defaultSize={58} minSize={30} maxSize={80} className="min-h-0 px-2">
+					<PreviewPanel overlayControls={overlayControls} overlayInstances={overlaySource.instances} onOverlayVisibilityChange={setOverlayVisibility} />
+				</ResizablePanel>
+				<ResizableHandle withHandle />
+				<ResizablePanel defaultSize={42} minSize={20} maxSize={70} className="min-h-0 px-2 pb-2">
+					<Timeline />
+				</ResizablePanel>
+			</ResizablePanelGroup>
+		);
 
 	return (
 		<ResizablePanelGroup
@@ -215,6 +233,12 @@ function EditorLayout() {
 
 /** 퀘스티 TA 다리: talks with the TA app when this editor is in its frame (src/questi/bridge.ts). */
 function QuestiBridge() {
-	useEffect(() => startQuestiBridge(), []);
+	const { setTheme } = useTheme();
+	useEffect(() => {
+		// The TA's look from the first paint (?theme=), then as it changes (theme messages).
+		const asked = new URLSearchParams(window.location.search).get("theme");
+		if (inQuestiFrame() && (asked === "dark" || asked === "light")) setTheme(asked);
+		return startQuestiBridge({ setTheme });
+	}, [setTheme]);
 	return null;
 }
