@@ -208,3 +208,8 @@ export function getDefaultShortcuts(): Map<
 
 	return shortcuts;
 }
+
+/** A saved action as one this editor has (keybindings read back from storage). */
+export function isActionWithOptionalArgs(value: unknown): value is TActionWithOptionalArgs {
+	return typeof value === "string" && Object.prototype.hasOwnProperty.call(ACTIONS, value);
+}

@@ -41,3 +41,12 @@ export type ShortcutKey = ModifierBasedShortcutKey | SingleCharacterShortcutKey;
 export type KeybindingConfig = {
 	[key in ShortcutKey]?: TActionWithOptionalArgs;
 };
+
+const MODIFIERS: ReadonlySet<string> = new Set<ModifierKeys>(["ctrl", "alt", "shift", "ctrl+shift", "alt+shift", "ctrl+alt", "ctrl+alt+shift"]);
+
+/** A saved key as one this editor knows ("ctrl+shift+z", "space"): read back from storage. */
+export function isShortcutKey(value: string): value is ShortcutKey {
+	const at = value.lastIndexOf("+");
+	if (at < 0) return isKey(value);
+	return MODIFIERS.has(value.slice(0, at)) && isKey(value.slice(at + 1));
+}

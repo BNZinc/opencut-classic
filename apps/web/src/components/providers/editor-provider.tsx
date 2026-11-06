@@ -1,5 +1,7 @@
 "use client";
 
+import { inQuestiFrame } from "@/questi/bridge";
+
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
@@ -56,8 +58,10 @@ export function EditorProvider({ projectId, children }: EditorProviderProps) {
 
 				if (isNotFound) {
 					try {
+						// In the TA's frame the project is the TA's video (its id): opened again, the same one.
 						const newProjectId = await editor.project.createNewProject({
 							name: "Untitled Project",
+							...(inQuestiFrame() ? { id: projectId } : {}),
 						});
 						router.replace(`/editor/${newProjectId}`);
 					} catch (_createErr) {
