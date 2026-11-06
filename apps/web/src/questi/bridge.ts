@@ -35,6 +35,9 @@ const ALLOWED = [
 	"http://tauri.localhost",
 	"https://tauri.localhost",
 	"https://questi-ta-web.jollyisland-31ca04f2.koreacentral.azurecontainerapps.io",
+	// The TA's development screens (its Vite page in the dev app and the browser).
+	"http://localhost:1420",
+	"http://127.0.0.1:1420",
 	...(process.env.NEXT_PUBLIC_QUESTI_ORIGINS ?? "").split(","),
 ]
 	.map((origin) => origin.trim())
