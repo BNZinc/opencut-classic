@@ -36,7 +36,7 @@ const LAYOUT = { width: 1080, height: 1920, top: 300, middle: 1180 } as const;
 /** The shapes edit_video makes (videoEdits.ts SHAPES). */
 const SHAPES: Record<string, [number, number]> = { "9:16": [1080, 1920], "1:1": [1080, 1080], "4:5": [1080, 1350], "16:9": [1920, 1080] };
 type Changed = { at: number; until: number | null; label: string | null };
-type Message = { questiVideo: 1; type: string; request?: string; plan?: Plan; changed?: Changed | null; at?: number; files?: Record<string, Blob>; theme?: string };
+type Message = { questiVideo: 1; type: string; request?: string; plan?: Plan; changed?: Changed | null; at?: number; files?: Record<string, Blob>; theme?: string; steps?: boolean };
 
 /** The TA app's own pages (its desktop webview, its web), plus NEXT_PUBLIC_QUESTI_ORIGINS (development). */
 const ALLOWED = [
@@ -54,6 +54,8 @@ const ALLOWED = [
 /** In the TA's frame: its welcome and news cards stay away. */
 export const inQuestiFrame = () => typeof window !== "undefined" && window.parent !== window;
 let running: (() => void) | null = null;
+/** Something is laid out on this page already: the next change from the chat is shown step by step. */
+let shownOnce = false;
 /** 바뀐 곳: the plain yellow highlighter of every TA viewer (its --color-change-mark), shown as long as the 판 is. */
 const CHANGED_COLOR = "#e8ff00";
 /** While a plan is laid out its own changes are not the teacher's edits. */
@@ -91,16 +93,70 @@ async function assetFor(url: string, name: string, ref: Record<string, string>):
 }
 
 /** A plan as this editor's timeline: its pieces one after another on the main track, then the logo and captions over them. */
-async function layOut(plan: Plan, changed: Changed | null | undefined) {
+async function layOut(plan: Plan, changed: Changed | null | undefined, steps = false) {
 	laying = true;
 	try {
-		await layOutNow(plan, changed);
+		if (steps && changed) await showSteps(plan, changed);
+		else await layOutNow(plan, changed, 0);
 	} finally {
 		laying = false;
 	}
 }
 
-async function layOutNow(plan: Plan, changed: Changed | null | undefined) {
+const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+/** A plan's length on the timeline (its pieces cut as they are). */
+const planLength = (plan: Plan) => plan.sources.reduce((sum, source) => sum + Math.max(0, (source.end ?? 0) - (source.start ?? 0)), 0);
+
+/** The playhead slides to a time (the teacher sees where the change is). */
+async function glideTo(at: number) {
+	const editor = EditorCore.getInstance();
+	const from = seconds(editor.playback.getCurrentTime());
+	const frames = 18;
+	for (let frame = 1; frame <= frames; frame++) {
+		editor.playback.seek({ time: ticks(from + ((at - from) * frame) / frames) });
+		await wait(28);
+	}
+}
+
+/** The changed stretch played once, then stopped there. */
+function playOnce(from: number, to: number) {
+	const editor = EditorCore.getInstance();
+	editor.playback.seek({ time: ticks(from) });
+	editor.playback.play();
+	const stop = editor.playback.onUpdate((time) => {
+		if (seconds(time) < to) return;
+		editor.playback.pause();
+		stop();
+	});
+	window.setTimeout(stop, Math.max(1, to - from) * 1000 + 4000);
+}
+
+/**
+ * 고치는 과정 보기 (user 2026-11-07, '1'): a change from the chat shown step by step on the timeline,
+ * not just its result — the playhead goes to the place; what goes away turns yellow and goes, the
+ * pieces after it close up; the logo and caption tracks come in one by one; the changed stretch
+ * plays once and stops. (The MP4 is made meanwhile by the TA's own engine.)
+ */
+async function showSteps(plan: Plan, changed: Changed) {
+	const editor = EditorCore.getInstance();
+	editor.playback.pause();
+	await glideTo(changed.at);
+	const before = seconds(editor.timeline.getTotalDuration());
+	const removed = before - planLength(plan);
+	if (removed > 0.05 && plan.sources.every((source) => source.end !== undefined)) {
+		// What goes away, yellow on the timeline as it is now, for a moment.
+		const time = ticks(changed.at);
+		editor.command.execute({ command: new ToggleBookmarkCommand(time) });
+		editor.command.execute({ command: new UpdateBookmarkCommand({ time, updates: { note: changed.label ?? "빠지는 곳", color: CHANGED_COLOR, duration: ticks(removed) } }) });
+		await wait(900);
+	}
+	await layOutNow(plan, null, 260);
+	markChanged(changed);
+	await wait(350);
+	playOnce(changed.at, changed.until !== null && changed.until > changed.at ? Math.min(changed.until, changed.at + 8) : changed.at + 3);
+}
+
+async function layOutNow(plan: Plan, changed: Changed | null | undefined, stagger: number) {
 	const editor = EditorCore.getInstance();
 	const scene = editor.scenes.getActiveScene();
 	const all = [...scene.tracks.overlay, scene.tracks.main, ...scene.tracks.audio].flatMap((track) => track.elements.map((element) => ({ trackId: track.id, elementId: element.id })));
@@ -156,11 +212,13 @@ async function layOutNow(plan: Plan, changed: Changed | null | undefined) {
 		at += end - start;
 	}
 	if (plan.logo?.url) {
+		if (stagger) await wait(stagger);
 		const logo = await assetFor(plan.logo.url, "logo.png", plan.logo.ref);
 		const image = buildElementFromMedia({ mediaId: logo.id, mediaType: "image", name: logo.name, duration: ticks(at), startTime: ticks(0) });
 		editor.timeline.insertElement({ element: { ...image, params: { ...image.params, ...logoPlace(plan.logo, logo, canvasSize) } }, placement: { mode: "auto" } });
 	}
 	for (const caption of plan.captions ?? []) {
+		if (stagger) await wait(stagger);
 		const text = buildTextElement({ raw: { ...DEFAULTS.text.element, name: caption.text.slice(0, 20), duration: ticks(caption.end - caption.start) }, startTime: ticks(caption.start) });
 		editor.timeline.insertElement({ element: { ...text, params: { ...text.params, ...captionLook(canvasSize, caption.position ?? (laidOut ? 0.74 : "bottom")), content: caption.text } }, placement: { mode: "auto", trackType: "text" } });
 	}
@@ -359,7 +417,9 @@ export function startQuestiBridge({ setTheme }: { setTheme?: (theme: string) => 
 		};
 		if (data.type === "open" && data.plan) run(async () => {
 			given = { ...given, ...(data.files ?? {}) };
-			await layOut(data.plan!, data.changed);
+			// Shown step by step once something is laid out here and the TA says where it changed.
+			await layOut(data.plan!, data.changed, shownOnce && data.steps !== false);
+			shownOnce = true;
 			edited = false;
 			tell({ type: "opened", request: data.request });
 			tell({ type: "edited", edited: false });
@@ -375,6 +435,15 @@ export function startQuestiBridge({ setTheme }: { setTheme?: (theme: string) => 
 		});
 	};
 	window.addEventListener("message", onMessage);
+	// Esc belongs to the TA (it closes what is open there) unless a field here is being typed in;
+	// the pointer leaving the editor hands the keyboard back to the TA's chat.
+	const onKey = (event: KeyboardEvent) => {
+		const target = event.target as HTMLElement | null;
+		if (event.key === "Escape" && !(target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)))) tell({ type: "key", key: "Escape" });
+	};
+	const onLeave = () => tell({ type: "leave" });
+	window.addEventListener("keydown", onKey);
+	document.documentElement.addEventListener("pointerleave", onLeave);
 	// The teacher changed the timeline here (cut, moved, typed): the TA offers [수정 완료]·[되돌리기].
 	let edited = false;
 	const stopWatching = EditorCore.getInstance().timeline.subscribe(() => {
@@ -392,6 +461,8 @@ export function startQuestiBridge({ setTheme }: { setTheme?: (theme: string) => 
 	window.parent.postMessage({ questiVideo: 1, type: "ready" }, "*");
 	running = () => {
 		window.removeEventListener("message", onMessage);
+		window.removeEventListener("keydown", onKey);
+		document.documentElement.removeEventListener("pointerleave", onLeave);
 		window.clearInterval(timer);
 		stopWatching();
 		running = null;
