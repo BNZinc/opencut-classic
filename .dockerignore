@@ -1,8 +1,22 @@
+node_modules
+.next
+.git
+.gitignore
+*.md
+.env*
+!.env.example
+.cursor
+.vscode
+diffs
+docs
+agent-transcripts
+mcps
+terminals
+apps/web/.font-cache
+# 퀘스티 (deploy/questi): every package's own modules and builds, local test files, the Rust app
 **/node_modules
 **/.next
-**/.env*
 apps/web/public/bench*.mp4
 apps/web/public/questi-harness.html
 rust/target
 apps/desktop
-.git
